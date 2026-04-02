@@ -1,92 +1,40 @@
 /**
- * STM32 OTA via ESP32 WiFi
- * ─────────────────────────────────────────────────────────────────
- *  Browser  ─── HTTP POST ──▶  ESP32 (HTTP Server)  ─── UART ──▶  STM32
- * ─────────────────────────────────────────────────────────────────
- *
- *  ESP32 phải expose các endpoint sau (port 80):
- *    GET  /ping              → 200 "PONG"
- *    POST /ota/start         → body: {size, version, crc32}  → 200 "ACK" | "NAK"
- *    POST /ota/chunk         → body: binary (chunk + CRC16)  → 200 "ACK" | "NAK"
- *    GET  /ota/done          → 200 "ACK" khi STM32 xác nhận xong
+ * STM32 Cloud OTA Dashboard — ota.js
+ * Browser (GitHub Pages) ── HTTPS ──▶ Cloud Server ◀── ESP32 poll
  */
 
-// ─── CONSTANTS ────────────────────────────────────────────────────
-const CHUNK_SIZE = 256;          // bytes mỗi chunk gửi UART
-const HTTP_TIMEOUT = 8000;       // ms
-const RETRY_MAX = 3;
+// ─── STATE ────────────────────────────────────────────────────
+let pollTimer    = null;
+let selectedId   = null;   // deviceId đang được chọn
 
-// ─── STATE ────────────────────────────────────────────────────────
-let esp32Reachable = false;
-
-// ─── HELPERS: CRC ─────────────────────────────────────────────────
-function crc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for (let b of buf) {
-    crc ^= b;
-    for (let i = 0; i < 8; i++)
-      crc = (crc & 1) ? ((crc >>> 1) ^ 0xEDB88320) : (crc >>> 1);
-  }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
-}
-
-function crc16(buf) {
-  let crc = 0xFFFF;
-  for (let b of buf) {
-    crc ^= (b << 8);
-    for (let i = 0; i < 8; i++) {
-      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
-      crc &= 0xFFFF;
-    }
-  }
-  return crc;
-}
-
-// ─── HELPERS: VERSION ─────────────────────────────────────────────
-function getVersion() {
-  const major = Math.min(255, Math.max(0, parseInt(document.getElementById('v_major').value) || 1));
-  const minor = Math.min(255, Math.max(0, parseInt(document.getElementById('v_minor').value) || 0));
-  const patch = Math.min(255, Math.max(0, parseInt(document.getElementById('v_patch').value) || 0));
-  return { major, minor, patch, encoded: (major << 16) | (minor << 8) | patch };
-}
-
-function autoPatch() {
-  const el = document.getElementById('v_patch');
-  el.value = (parseInt(el.value) || 0) + 1;
-}
-
-// ─── HELPERS: FILE ────────────────────────────────────────────────
-function onFileChange() {
-  const f = document.getElementById('fileInput').files[0];
-  const el = document.getElementById('fileName');
-  if (f) {
-    el.textContent = `📄 ${f.name}  (${formatBytes(f.size)})`;
-    updateOtaButton();
-  } else {
-    el.textContent = '';
-  }
-}
-
+// ─── HELPERS ──────────────────────────────────────────────────
 function formatBytes(n) {
+  if (!n) return '0 B';
   if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-  return (n / 1024 / 1024).toFixed(2) + ' MB';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
 }
 
-function updateOtaButton() {
-  const btn = document.getElementById('btnOTA');
-  const hasFile = document.getElementById('fileInput').files.length > 0;
-  btn.disabled = !(esp32Reachable && hasFile);
+function timeSince(ms) {
+  if (!ms) return '—';
+  const s = Math.round((Date.now() - ms) / 1000);
+  if (s < 5)  return 'vừa xong';
+  if (s < 60) return s + 's trước';
+  if (s < 3600) return Math.floor(s / 60) + 'm trước';
+  return Math.floor(s / 3600) + 'h trước';
 }
 
-// ─── HELPERS: LOG ─────────────────────────────────────────────────
-function clearLog() {
-  document.getElementById('log').innerHTML = '';
+function formatTime(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('vi-VN');
 }
+
+// ─── LOG ──────────────────────────────────────────────────────
+function clearLog() { document.getElementById('log').innerHTML = ''; }
 
 function log(msg, cls = '') {
-  const el = document.getElementById('log');
-  const t = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+  const el   = document.getElementById('log');
+  const t    = new Date().toLocaleTimeString('vi-VN', { hour12: false });
   const line = document.createElement('div');
   if (cls) line.classList.add(cls);
   line.textContent = `[${t}] ${msg}`;
@@ -94,179 +42,240 @@ function log(msg, cls = '') {
   el.scrollTop = el.scrollHeight;
 }
 
-// ─── HELPERS: PROGRESS ────────────────────────────────────────────
-function showProgress(visible) {
-  document.getElementById('progressWrap').classList.toggle('visible', visible);
+// ─── FILE ─────────────────────────────────────────────────────
+function onFileChange() {
+  const f  = document.getElementById('fileInput').files[0];
+  const el = document.getElementById('fileName');
+  el.textContent = f ? `📄 ${f.name}  (${formatBytes(f.size)})` : '';
+  updateUploadBtn();
 }
 
-function setProgress(sent, total) {
-  const pct = total > 0 ? Math.round(sent / total * 100) : 0;
-  document.getElementById('progressBar').style.width = pct + '%';
-  document.getElementById('progressPct').textContent = pct + '%';
-  document.getElementById('progressLabel').textContent =
-    `Chunk ${sent}/${total} — ${formatBytes(sent * CHUNK_SIZE)} / ${formatBytes(total * CHUNK_SIZE)}`;
+function updateUploadBtn() {
+  const hasFile   = document.getElementById('fileInput').files.length > 0;
+  const hasDevice = !!selectedId;
+  document.getElementById('btnUpload').disabled = !(hasFile && hasDevice);
 }
 
-// ─── HTTP UTIL ────────────────────────────────────────────────────
-function getBaseUrl() {
-  return `http://${document.getElementById('esp32ip').value.trim()}`;
+// ─── SERVER URL ───────────────────────────────────────────────
+function getServerUrl() {
+  return document.getElementById('serverUrl').value.trim().replace(/\/$/, '');
 }
 
-async function httpFetch(path, options = {}, timeoutMs = HTTP_TIMEOUT) {
+// ─── FETCH ────────────────────────────────────────────────────
+async function apiFetch(path, opts = {}, timeout = 10000) {
   const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), timeoutMs);
+  const id   = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const res = await fetch(getBaseUrl() + path, { ...options, signal: ctrl.signal });
+    const res = await fetch(getServerUrl() + path, { ...opts, signal: ctrl.signal });
     clearTimeout(id);
     return res;
-  } catch (e) {
-    clearTimeout(id);
-    throw e;
-  }
+  } catch (e) { clearTimeout(id); throw e; }
 }
 
-async function httpText(path, options = {}) {
-  const res = await httpFetch(path, options);
-  const text = await res.text();
-  return { ok: res.ok, status: res.status, text: text.trim() };
-}
-
-// ─── PING ─────────────────────────────────────────────────────────
-async function pingESP32() {
-  const pill = document.getElementById('statusPill');
-  pill.className = 'checking';
-  pill.innerHTML = '<span class="dot pulse"></span> Đang kiểm tra...';
-  esp32Reachable = false;
-  updateOtaButton();
+// ─── CONNECT ──────────────────────────────────────────────────
+async function connectServer() {
+  const pill = document.getElementById('serverPill');
+  pill.className = 'status-pill checking';
+  pill.innerHTML = '<span class="dot pulse"></span> Đang kết nối...';
 
   try {
-    const { ok, text } = await httpText('/ping', {}, 4000);
-    if (ok && text === 'PONG') {
-      pill.className = 'connected';
-      pill.innerHTML = '<span class="dot"></span> Đã kết nối ESP32';
-      esp32Reachable = true;
-      log('✅ ESP32 phản hồi: ' + getBaseUrl(), 'ok');
-    } else {
-      throw new Error(`Unexpected: ${text}`);
-    }
+    const res = await apiFetch('/health', {}, 5000);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    pill.className = 'status-pill connected';
+    pill.innerHTML = '<span class="dot"></span> Server online';
+    log('✅ Kết nối server: ' + getServerUrl(), 'ok');
+    startPolling();
   } catch (e) {
-    pill.className = 'disconnected';
+    pill.className = 'status-pill disconnected';
     pill.innerHTML = '<span class="dot"></span> Không kết nối được';
-    log('❌ Ping thất bại: ' + e.message, 'err');
+    log('❌ Lỗi kết nối: ' + e.message, 'err');
+    log('   → Kiểm tra URL server, đảm bảo server đang chạy và có CORS', 'dim');
   }
-  updateOtaButton();
 }
 
-// ─── OTA ──────────────────────────────────────────────────────────
-async function startOTA() {
-  if (!esp32Reachable) { alert('Chưa kết nối với ESP32!'); return; }
+// ─── DEVICE LIST POLLING ──────────────────────────────────────
+function startPolling() {
+  stopPolling();
+  fetchDevices();
+  pollTimer = setInterval(fetchDevices, 3000);
+}
 
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+async function fetchDevices() {
+  try {
+    const res  = await apiFetch('/api/devices', {}, 4000);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const list = await res.json();
+    renderDevices(list);
+  } catch (e) {
+    /* silent — server might be momentarily unavailable */
+  }
+}
+
+// ─── RENDER DEVICE LIST ───────────────────────────────────────
+function renderDevices(list) {
+  const container = document.getElementById('deviceList');
+  const emptyMsg  = document.getElementById('deviceEmpty');
+
+  if (!list || list.length === 0) {
+    container.innerHTML = '';
+    emptyMsg.style.display = 'block';
+    selectedId = null;
+    updateUploadBtn();
+    document.getElementById('btnTrigger').disabled = true;
+    return;
+  }
+
+  emptyMsg.style.display = 'none';
+
+  // Giữ lại selection nếu device vẫn tồn tại
+  const ids = list.map(d => d.id);
+  if (selectedId && !ids.includes(selectedId)) selectedId = null;
+
+  container.innerHTML = list.map(dev => {
+    const isSelected = dev.id === selectedId;
+    const onlineCls  = dev.online ? 'online' : 'offline';
+
+    let statusBadge = '';
+    if (dev.otaTrigger && dev.otaStatus === 'pending')
+      statusBadge = '<span class="dev-badge pending">⏳ OTA đang chờ</span>';
+    else if (dev.otaStatus === 'done')
+      statusBadge = '<span class="dev-badge success">✅ OTA thành công</span>';
+    else if (dev.otaStatus === 'error')
+      statusBadge = '<span class="dev-badge error">❌ OTA lỗi</span>';
+
+    const fwVersion = dev.firmware ? `Server: v${dev.firmware.version}` : 'Chưa có FW';
+
+    return `
+      <div class="device-card ${onlineCls} ${isSelected ? 'selected' : ''}"
+           onclick="selectDevice('${dev.id}')" id="dev-${dev.id}">
+        <div class="dev-top">
+          <div class="dev-info">
+            <div class="dev-name">
+              <span class="dev-dot ${onlineCls}"></span>
+              ${escHtml(dev.name)}
+            </div>
+            <div class="dev-id">${escHtml(dev.id)}</div>
+          </div>
+          <div class="dev-right">
+            <div class="dev-ver">STM32: v${escHtml(dev.version)}</div>
+            <div class="dev-ver dim">${fwVersion}</div>
+          </div>
+        </div>
+        <div class="dev-bottom">
+          <span class="dev-meta">${dev.online ? '⬤ Online' : '○ Offline'} · ${timeSince(dev.lastSeen)}</span>
+          ${statusBadge}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  updateTriggerBtn(list);
+  updateUploadBtn();
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function selectDevice(id) {
+  selectedId = (selectedId === id) ? null : id;
+  // Re-render highlight
+  document.querySelectorAll('.device-card').forEach(el => el.classList.remove('selected'));
+  if (selectedId) {
+    const el = document.getElementById('dev-' + selectedId);
+    if (el) el.classList.add('selected');
+  }
+  updateUploadBtn();
+  updateTriggerBtn();
+}
+
+function updateTriggerBtn(list = null) {
+  const btn = document.getElementById('btnTrigger');
+  if (!selectedId) { btn.disabled = true; return; }
+  if (list) {
+    const dev = list.find(d => d.id === selectedId);
+    const hasFw   = dev && dev.firmware;
+    const isOnline = dev && dev.online;
+    const pending  = dev && dev.otaTrigger;
+    btn.disabled = !(hasFw && isOnline && !pending);
+  }
+}
+
+// ─── UPLOAD FIRMWARE ──────────────────────────────────────────
+async function uploadFirmware() {
+  if (!selectedId) { alert('Chọn thiết bị trước!'); return; }
   const fileEl = document.getElementById('fileInput');
-  if (!fileEl.files.length) { alert('Chưa chọn file firmware!'); return; }
+  if (!fileEl.files.length) { alert('Chọn file .bin trước!'); return; }
 
-  clearLog();
-  showProgress(true);
+  const file  = fileEl.files[0];
+  const major = parseInt(document.getElementById('v_major').value) || 1;
+  const minor = parseInt(document.getElementById('v_minor').value) || 0;
+  const patch = parseInt(document.getElementById('v_patch').value) || 0;
 
-  const btnOTA = document.getElementById('btnOTA');
-  btnOTA.disabled = true;
-  btnOTA.innerHTML = '⏳ Đang OTA...';
+  const form = new FormData();
+  form.append('firmware', file);
+  form.append('deviceId', selectedId);
+  form.append('major', major);
+  form.append('minor', minor);
+  form.append('patch', patch);
+
+  const btn = document.getElementById('btnUpload');
+  btn.disabled = true; btn.innerHTML = '⏳ Đang upload...';
+  log(`📤 Upload v${major}.${minor}.${patch} → thiết bị "${selectedId}"...`);
 
   try {
-    const file = fileEl.files[0];
-    const fw   = new Uint8Array(await file.arrayBuffer());
-    const size = fw.length;
-    const crc  = crc32(fw);
-    const v    = getVersion();
-
-    log(`📦 File: ${file.name}  (${formatBytes(size)})`, 'info');
-    log(`🔢 Version: ${v.major}.${v.minor}.${v.patch}  (0x${v.encoded.toString(16).toUpperCase()})`, 'info');
-    log(`🔐 CRC32: 0x${crc.toString(16).toUpperCase().padStart(8,'0')}`, 'info');
-    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'dim');
-
-    // ── 1. START ──
-    log('📡 Gửi lệnh OTA START...');
-    const startBody = new DataView(new ArrayBuffer(12));
-    startBody.setUint32(0, size, true);
-    startBody.setUint32(4, v.encoded, true);
-    startBody.setUint32(8, crc, true);
-
-    const startRes = await httpText('/ota/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: startBody.buffer
-    });
-
-    if (!startRes.ok || startRes.text !== 'ACK')
-      throw new Error(`START thất bại: ${startRes.text}`);
-
-    log('✅ ACK START — STM32 đã sẵn sàng', 'ok');
-
-    // ── 2. CHUNKS ──
-    const total = Math.ceil(size / CHUNK_SIZE);
-    log(`📤 Gửi ${total} chunks (${CHUNK_SIZE} bytes/chunk)...`);
-
-    for (let i = 0; i < total; i++) {
-      const chunk = fw.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-      const c16   = crc16(chunk);
-
-      // packet = chunk + CRC16 (little-endian 2 bytes)
-      const packet = new Uint8Array(chunk.length + 2);
-      packet.set(chunk);
-      new DataView(packet.buffer).setUint16(chunk.length, c16, true);
-
-      let success = false;
-      for (let attempt = 0; attempt < RETRY_MAX; attempt++) {
-        const r = await httpText('/ota/chunk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: packet
-        });
-
-        if (r.ok && r.text === 'ACK') { success = true; break; }
-
-        log(`⚠️ Chunk ${i+1}: lần ${attempt+1} NAK — thử lại...`, 'err');
-        await delay(300);
-      }
-
-      if (!success) throw new Error(`Chunk ${i+1}/${total} thất bại sau ${RETRY_MAX} lần`);
-
-      setProgress(i + 1, total);
-
-      // Log mỗi 16 chunks để tránh spam
-      if ((i + 1) % 16 === 0 || i + 1 === total)
-        log(`   ✔ Chunk ${i+1}/${total}`, 'ok');
-    }
-
-    // ── 3. DONE ──
-    log('');
-    log('⏳ Chờ STM32 xác nhận hoàn tất...');
-    const doneRes = await httpText('/ota/done', {}, 30000);
-
-    if (!doneRes.ok || doneRes.text !== 'ACK')
-      throw new Error(`DONE thất bại: ${doneRes.text}`);
-
-    log('');
-    log('🎉 ══════════════════════════════', 'ok');
-    log('🎉  OTA THÀNH CÔNG!               ', 'ok');
-    log('🎉 ══════════════════════════════', 'ok');
-    log(`   STM32 sẽ khởi động firmware v${v.major}.${v.minor}.${v.patch}`, 'ok');
-
+    const res  = await apiFetch('/api/upload', { method: 'POST', body: form }, 30000);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload lỗi');
+    log(`✅ Upload OK! Firmware v${data.meta.version} (${formatBytes(data.meta.size)}) đã lưu trên server`, 'ok');
+    log(`   → Nhấn "Trigger OTA" để ra lệnh ESP32 tải về và flash STM32`, 'dim');
+    // Auto tăng patch
+    document.getElementById('v_patch').value = patch + 1;
+    fetchDevices();
   } catch (e) {
-    log('');
-    log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━', 'dim');
-    log('❌ LỖI: ' + e.message, 'err');
+    log('❌ Upload thất bại: ' + e.message, 'err');
   } finally {
-    btnOTA.disabled = false;
-    btnOTA.innerHTML = '🚀 Bắt đầu OTA Update';
-    updateOtaButton();
+    btn.disabled = false; btn.innerHTML = '☁️ Upload lên Server';
+    updateUploadBtn();
   }
 }
 
-// ─── UTIL ─────────────────────────────────────────────────────────
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ─── TRIGGER OTA ──────────────────────────────────────────────
+async function triggerOTA() {
+  if (!selectedId) { alert('Chọn thiết bị trước!'); return; }
+  if (!confirm(`Trigger OTA cho thiết bị "${selectedId}"?\n\nESP32 sẽ tải firmware và flash STM32 qua UART.`)) return;
 
-// ─── INIT ─────────────────────────────────────────────────────────
+  const btn = document.getElementById('btnTrigger');
+  btn.disabled = true; btn.innerHTML = '⏳ Đang trigger...';
+  log(`🚀 Trigger OTA → "${selectedId}"...`);
+
+  try {
+    const res  = await apiFetch('/api/trigger-ota', {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ deviceId: selectedId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Trigger lỗi');
+    log('✅ ' + data.message, 'ok');
+    log('⏳ Theo dõi trạng thái thiết bị bên dưới...', 'dim');
+    fetchDevices();
+  } catch (e) {
+    log('❌ Trigger thất bại: ' + e.message, 'err');
+    btn.disabled = false; btn.innerHTML = '🚀 Trigger OTA';
+  }
+}
+
+// ─── INIT ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  updateOtaButton();
-  log('Giao diện OTA sẵn sàng. Nhập IP ESP32 và nhấn "Kiểm tra kết nối".', 'dim');
+  log('Cloud OTA Dashboard sẵn sàng.', 'dim');
+  log('1. Nhập URL cloud server → Kết nối', 'dim');
+  log('2. Danh sách ESP32 online sẽ hiện bên dưới', 'dim');
+  log('3. Chọn thiết bị → Upload firmware → Trigger OTA', 'dim');
+  updateUploadBtn();
 });
