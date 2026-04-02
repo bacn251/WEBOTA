@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>STM32 OTA Web Sender</title>
+</head>
+<body>
+
+<h2>STM32 OTA Sender</h2>
+
+<!-- Connection -->
+<div>
+  <button id="btnConnect" onclick="toggleConnection()">Connect</button>
+  <span id="status" style="color:rgba(0, 0, 0, 0)">Disconnected</span>
+</div>
+
+<br>
+
+<!-- File -->
+<div>
+  <label>Firmware:</label>
+  <input type="file" id="fileInput">
+</div>
+
+<!-- Version -->
+<div>
+  <label>Version:</label>
+  <input type="number" id="v_major" value="1" min="0"> .
+  <input type="number" id="v_minor" value="0" min="0"> .
+  <input type="number" id="v_patch" value="0" min="0">
+  <button onclick="autoPatch()">+1 patch</button>
+</div>
+
+<br>
+
+<button id="btnOTA" onclick="startOTA()" disabled>Start OTA</button>
+<button onclick="clearLog()">Clear Log</button>
+
+<pre id="log" style="height:300px;overflow:auto;border:1px solid #ccc;"></pre>
+
+<script src="ota.js"></script>
+</body>
+</html>
