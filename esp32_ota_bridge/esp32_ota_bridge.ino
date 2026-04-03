@@ -33,7 +33,7 @@
 // Ví dụ Render:   "https://webota.onrender.com"
 // Ví dụ EC2/VPS:  "http://18.228.223.47:3000"
 // Ví dụ local:    "http://192.168.1.100:3000"
-#define SERVER_BASE_URL "http://YOUR_SERVER_IP:3000"
+#define SERVER_BASE_URL "https://f334-203-113-135-114.ngrok-free.app/"
 
 // ID + Tên hiển thị cho thiết bị này (phải unique nếu có nhiều ESP32)
 #define DEVICE_ID       "esp32-001"
