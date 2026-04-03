@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ESP32 OTA Dashboard</title>
+  <meta name="description" content="Quản lý OTA firmware STM32 qua ESP32 — Cloud Server" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    /* ── TOKENS ─────────────────────────────────────────────── */
+    :root {
+      --bg:        #080c12;
+      --bg2:       #0d1117;
+      --surface:   #13191f;
+      --surface2:  #1c2330;
+      --surface3:  #222d3a;
+      --border:    #263040;
+      --border2:   #2e3d50;
+
+      --blue:      #4f9cf9;
+      --blue-dim:  rgba(79,156,249,.12);
+      --blue-glow: rgba(79,156,249,.35);
+      --green:     #34d058;
+      --green-dim: rgba(52,208,88,.12);
+      --yellow:    #f0c93a;
+      --red:       #f47067;
+      --purple:    #bd7cf6;
+
+      --text:      #cdd9e5;
+      --muted:     #768390;
+      --dim:       #444d56;
+      --radius:    14px;
+      --radius-sm: 9px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px 100px;
+    }
+
+    /* scrollbar */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
+
+    /* ── HEADER ─────────────────────────────────────────────── */
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+      width: 100%;
+      max-width: 760px;
+    }
+
+    .logo-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .logo-icon {
+      width: 48px; height: 48px;
+      background: linear-gradient(135deg, #1a3a6e, #4f9cf9);
+      border-radius: 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px;
+      box-shadow: 0 4px 20px rgba(79,156,249,.4);
+    }
+
+    header h1 {
+      font-size: clamp(24px, 5vw, 38px);
+      font-weight: 700;
+      background: linear-gradient(135deg, #cdd9e5 20%, #4f9cf9 80%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      line-height: 1.2;
+    }
+
+    header p {
+      color: var(--muted);
+      font-size: 14px;
+      margin-top: 6px;
+    }
+
+    /* ── SERVER PILL ─────────────────────────────────────────── */
+    .server-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 18px;
+      padding: 8px 18px;
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid var(--border2);
+      background: var(--surface);
+      transition: all .3s;
+    }
+    .server-pill.online  { border-color: rgba(52,208,88,.4);  color: var(--green); background: var(--green-dim); }
+    .server-pill.offline { border-color: rgba(244,112,103,.4); color: var(--red); }
+    .server-pill.checking { border-color: rgba(240,201,58,.4); color: var(--yellow); }
+    .server-url { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+
+    /* ── ARCH ────────────────────────────────────────────────── */
+    .arch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 18px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+    }
+    .anode {
+      padding: 5px 12px;
+      border-radius: 8px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      transition: all .2s;
+    }
+    .anode.active { border-color: var(--blue); color: var(--blue); background: var(--blue-dim); }
+    .arr { color: var(--dim); font-size: 13px; }
+
+    /* ── CARD ────────────────────────────────────────────────── */
+    .card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 16px;
+      transition: border-color .2s;
+    }
+    .card:hover { border-color: var(--border2); }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 18px;
+    }
+    .card-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-title .icon { font-size: 15px; }
+
+    /* ── BADGE ───────────────────────────────────────────────── */
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600;
+    }
+    .badge-blue   { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(79,156,249,.3); }
+    .badge-green  { background: var(--green-dim); color: var(--green); border: 1px solid rgba(52,208,88,.3); }
+    .badge-yellow { background: rgba(240,201,58,.12); color: var(--yellow); border: 1px solid rgba(240,201,58,.3); }
+    .badge-red    { background: rgba(244,112,103,.12); color: var(--red); border: 1px solid rgba(244,112,103,.3); }
+
+    /* ── DOT ─────────────────────────────────────────────────── */
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+      background: currentColor;
+    }
+    .dot-pulse { animation: dpulse 1.8s ease-in-out infinite; }
+    @keyframes dpulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    /* ── DEVICE LIST ─────────────────────────────────────────── */
+    #deviceList { display: flex; flex-direction: column; gap: 10px; }
+
+    .dev-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px;
+      cursor: pointer;
+      transition: all .2s;
+      user-select: none;
+      position: relative;
+      overflow: hidden;
+    }
+    .dev-card::before {
+      content: '';
+      position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: var(--muted);
+      border-radius: 3px 0 0 3px;
+      transition: background .2s;
+    }
+    .dev-card.is-online::before  { background: var(--green); }
+    .dev-card.is-selected::before { background: var(--blue); }
+    .dev-card:hover  { border-color: var(--border2); background: var(--surface3); }
+    .dev-card.is-selected { border-color: rgba(79,156,249,.5); background: rgba(79,156,249,.05); }
+    .dev-card.is-offline  { opacity: .55; }
+
+    .dev-row1 { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .dev-left { display: flex; flex-direction: column; gap: 4px; }
+    .dev-name { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+    .dev-id   { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+    .dev-ip   { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--dim); }
+    .dev-right { text-align: right; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+    .dev-ver  { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .dev-row2 { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; gap: 8px; }
+    .dev-meta { font-size: 11px; color: var(--dim); }
+
+    /* online dot glow */
+    .dev-card.is-online .dev-name .dot {
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(52,208,88,.2);
+      animation: glow 2.5s ease-in-out infinite;
+    }
+    @keyframes glow { 0%,100%{box-shadow:0 0 0 3px rgba(52,208,88,.2)} 50%{box-shadow:0 0 0 6px rgba(52,208,88,.1)} }
+
+    #deviceEmpty {
+      text-align: center; padding: 40px; color: var(--muted); font-size: 13px; line-height: 1.8;
+    }
+    #deviceEmpty .emo { font-size: 40px; display: block; margin-bottom: 10px; opacity: .6; }
+
+    /* ── HINT ────────────────────────────────────────────────── */
+    .hint-box {
+      background: rgba(79,156,249,.07);
+      border: 1px solid rgba(79,156,249,.2);
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.7;
+      margin-bottom: 16px;
+    }
+    .hint-box code {
+      background: var(--surface3); border: 1px solid var(--border2);
+      border-radius: 4px; padding: 1px 6px;
+      font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--blue);
+    }
+
+    /* ── SELECTED LABEL ──────────────────────────────────────── */
+    .sel-label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--muted); margin-bottom: 14px;
+    }
+    .sel-tag { background: var(--blue-dim); border: 1px solid rgba(79,156,249,.35); border-radius: 6px; padding: 3px 10px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--blue); }
+    .sel-none { color: var(--red); }
+
+    /* ── FILE DROP ───────────────────────────────────────────── */
+    .file-drop {
+      border: 2px dashed var(--border2);
+      border-radius: var(--radius-sm);
+      padding: 28px 20px;
+      text-align: center;
+      cursor: pointer;
+      position: relative;
+      transition: all .2s;
+    }
+    .file-drop:hover, .file-drop.drag { border-color: var(--blue); background: var(--blue-dim); }
+    .file-drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+    .file-drop .fi   { font-size: 28px; display: block; margin-bottom: 8px; }
+    .file-drop .fh   { font-size: 13px; color: var(--muted); }
+    .file-drop .fn   { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--green); margin-top: 6px; word-break: break-all; }
+
+    /* ── VERSION ROW ─────────────────────────────────────────── */
+    .ver-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+    .ver-row label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .ver-row input { width: 68px; text-align: center; }
+    .ver-sep { color: var(--dim); font-size: 20px; font-weight: 700; }
+
+    /* ── INPUTS ──────────────────────────────────────────────── */
+    input[type="number"], input[type="text"] {
+      background: var(--surface3);
+      border: 1px solid var(--border2);
+      border-radius: 8px;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      padding: 9px 12px;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(79,156,249,.15); }
+
+    /* ── BUTTONS ─────────────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      border: none; outline: none; border-radius: 9px;
+      font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600;
+      padding: 10px 20px; cursor: pointer;
+      transition: transform .1s, box-shadow .2s, opacity .15s;
+      user-select: none;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:disabled { opacity: .35; cursor: not-allowed; transform: none !important; }
+
+    .btn-ghost  { background: var(--surface3); color: var(--muted); border: 1px solid var(--border2); }
+    .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: #3d5068; }
+    .btn-sm     { padding: 7px 13px; font-size: 12px; border-radius: 7px; }
+    .btn-full   { width: 100%; padding: 14px; font-size: 14px; }
+
+    .btn-blue {
+      background: linear-gradient(135deg, #1a56c4, #4f9cf9);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(79,156,249,.35);
+    }
+    .btn-blue:hover:not(:disabled) { box-shadow: 0 6px 26px rgba(79,156,249,.55); }
+
+    .btn-purple {
+      background: linear-gradient(135deg, #5a2eac, #bd7cf6);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(189,124,246,.35);
+    }
+    .btn-purple:hover:not(:disabled) { box-shadow: 0 6px 26px rgba(189,124,246,.55); }
+
+    .btn-green {
+      background: linear-gradient(135deg, #1a7a3c, #34d058);
+      color: #fff;
+      box-shadow: 0 4px 18px rgba(52,208,88,.35);
+    }
+    .btn-green:hover:not(:disabled) { box-shadow: 0 6px 26px rgba(52,208,88,.55); }
+
+    /* ── LOG ─────────────────────────────────────────────────── */
+    #log {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; line-height: 1.75;
+      padding: 14px; height: 230px;
+      overflow-y: auto; color: var(--dim);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    #log .ok   { color: var(--green); }
+    #log .err  { color: var(--red); }
+    #log .info { color: var(--blue); }
+    #log .warn { color: var(--yellow); }
+
+    /* ── FOOTER ──────────────────────────────────────────────── */
+    footer { margin-top: 36px; font-size: 11px; color: var(--dim); text-align: center; }
+
+    /* ── ANIMATIONS ──────────────────────────────────────────── */
+    @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+    .dev-card { animation: fadeIn .2s ease both; }
+
+    /* ── PROGRESS BAR ────────────────────────────────────────── */
+    .progress {
+      height: 3px; border-radius: 2px; background: var(--border);
+      overflow: hidden; margin-top: 10px;
+    }
+    .progress-bar {
+      height: 100%; border-radius: 2px; width: 60%;
+      background: linear-gradient(90deg, var(--blue), var(--green));
+      animation: prog 1.5s linear infinite;
+    }
+    @keyframes prog { 0%{transform:translateX(-100%)} 100%{transform:translateX(200%)} }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<header>
+  <div class="logo-row">
+    <div class="logo-icon">🛰️</div>
+    <div>
+      <h1>OTA Dashboard</h1>
+    </div>
+  </div>
+  <p>Upload firmware → ESP32 tự tải và flash vào STM32 qua UART</p>
+
+  <div style="display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap;">
+    <span id="serverPill" class="server-pill checking">
+      <span class="dot dot-pulse"></span>
+      <span id="serverStatus">Đang kết nối...</span>
+    </span>
+    <span class="server-url" id="serverUrlLabel"></span>
+  </div>
+
+  <div class="arch">
+    <div class="anode">STM32</div>
+    <span class="arr">◀ UART</span>
+    <div class="anode active">ESP32</div>
+    <span class="arr">── poll ──▶</span>
+    <div class="anode active">Server + Web UI</div>
+    <span class="arr">◀── ngrok ──</span>
+    <div class="anode active">Internet</div>
+  </div>
+</header>
+
+<!-- ═══════════════ DEVICE LIST ═══════════════ -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title">
+      <span class="icon">📡</span>
+      ESP32 đang kết nối
+    </div>
+    <span style="font-size:11px; color:var(--dim);" id="refreshTick">Làm mới mỗi 3s</span>
+  </div>
+
+  <div class="hint-box">
+    ✏️ Trong <code>esp32_ota_bridge.ino</code> sửa <code>SERVER_BASE_URL</code> thành URL ngrok.
+    Mỗi thiết bị cần <code>DEVICE_ID</code> khác nhau. Click card để <strong>chọn</strong> thiết bị.
+  </div>
+
+  <div id="deviceList"></div>
+  <div id="deviceEmpty">
+    <span class="emo">📡</span>
+    Chưa có ESP32 nào kết nối.<br>
+    Kiểm tra ESP32 đã nạp code và trỏ đúng URL server.
+  </div>
+</div>
+
+<!-- ═══════════════ UPLOAD FIRMWARE ═══════════════ -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title"><span class="icon">☁️</span> Upload Firmware</div>
+  </div>
+
+  <div class="sel-label">
+    <span>Thiết bị:</span>
+    <span id="selectedLabel" class="sel-none">— Chưa chọn —</span>
+  </div>
+
+  <div class="file-drop" id="fileDrop">
+    <input type="file" id="fileInput" accept=".bin" onchange="onFileChange()" />
+    <span class="fi">📦</span>
+    <div class="fh">Kéo thả hoặc click để chọn file <strong>.bin</strong></div>
+    <div class="fn" id="fileName"></div>
+  </div>
+
+  <div class="ver-row">
+    <label>Phiên bản:</label>
+    <input type="number" id="v_major" value="1" min="0" max="255" />
+    <span class="ver-sep">.</span>
+    <input type="number" id="v_minor" value="0" min="0" max="255" />
+    <span class="ver-sep">.</span>
+    <input type="number" id="v_patch" value="0" min="0" max="255" />
+    <button class="btn btn-ghost btn-sm"
+      onclick="document.getElementById('v_patch').value = +document.getElementById('v_patch').value + 1">
+      +1 Patch
+    </button>
+  </div>
+
+  <button class="btn btn-purple btn-full" id="btnUpload" onclick="uploadFirmware()" disabled style="margin-top:16px;">
+    ☁️ Upload lên Server
+  </button>
+</div>
+
+<!-- ═══════════════ TRIGGER OTA ═══════════════ -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title"><span class="icon">🚀</span> Trigger OTA</div>
+  </div>
+
+  <p style="font-size:13px; color:var(--muted); margin-bottom:16px; line-height:1.7;">
+    Sau khi upload firmware, nhấn nút này để ra lệnh cho ESP32 tải firmware và flash STM32.
+    ESP32 sẽ thực hiện trong <strong style="color:var(--text);">≤ 30 giây</strong>.
+  </p>
+
+  <button class="btn btn-green btn-full" id="btnTrigger" onclick="triggerOTA()" disabled>
+    🚀 Kích hoạt OTA cho thiết bị đang chọn
+  </button>
+</div>
+
+<!-- ═══════════════ LOG ═══════════════ -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-title"><span class="icon">📋</span> Console Log</div>
+    <button class="btn btn-ghost btn-sm" onclick="clearLog()">Xóa log</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<footer>ESP32 Cloud OTA Dashboard v4.0 &nbsp;·&nbsp; Node.js + ngrok</footer>
+
+<script>
+  /* ── Drag & Drop ── */
+  const drop = document.getElementById('fileDrop');
+  ['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('drag'); }));
+  ['dragleave','dragend'].forEach(e => drop.addEventListener(e, () => drop.classList.remove('drag')));
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); drop.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (f) { document.getElementById('fileInput').files = e.dataTransfer.files; onFileChange(); }
+  });
+</script>
+<script src="ota.js"></script>
+</body>
+</html>

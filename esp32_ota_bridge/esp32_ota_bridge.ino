@@ -2,9 +2,9 @@
  * ESP32 OTA Bridge — ESP32 → STM32 OTA via Cloud Server
  * ════════════════════════════════════════════════════════════════
  *
- *  ESP32 chủ động kết nối ra internet đến Cloud Server.
- *  Browser (GitHub Pages) thấy danh sách thiết bị trên Cloud Server
- *  và chọn thiết bị để trigger OTA.
+ *  ESP32 kết nối ra internet đến Cloud Server (Node.js).
+ *  Giao diện web được SERVER HOST luôn — truy cập SERVER_BASE_URL bằng trình duyệt.
+ *  ESP32 poll server để nhận lệnh OTA từ web dashboard.
  *
  *  Luồng:
  *    1. ESP32 boot → kết nối WiFi
@@ -14,7 +14,7 @@
  *    5. Báo kết quả lên POST /api/ota-result
  *
  * ════════════════════════════════════════════════════════════════
- *  CẤU HÌNH:  Sửa 3 dòng bên dưới
+ *  CẤU HÌNH: Sửa các dòng bên dưới theo môi trường của bạn
  * ════════════════════════════════════════════════════════════════
  */
 
@@ -28,10 +28,12 @@
 #define WIFI_SSID       "noname"
 #define WIFI_PASSWORD   "12345678"
 
-// URL cloud server của bạn
-// Ví dụ Railway: "https://webota-server.up.railway.app"
-// Ví dụ EC2 HTTP: "http://18.228.223.47:3000"
-#define SERVER_BASE_URL "https://bacn251.github.io/WEBOTA/"
+// ★ URL cloud server của bạn (Node.js server — KHÔNG phải GitHub Pages)
+// Ví dụ Railway:  "https://webota-server.up.railway.app"
+// Ví dụ Render:   "https://webota.onrender.com"
+// Ví dụ EC2/VPS:  "http://18.228.223.47:3000"
+// Ví dụ local:    "http://192.168.1.100:3000"
+#define SERVER_BASE_URL "http://YOUR_SERVER_IP:3000"
 
 // ID + Tên hiển thị cho thiết bị này (phải unique nếu có nhiều ESP32)
 #define DEVICE_ID       "esp32-001"

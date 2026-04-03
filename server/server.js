@@ -1,22 +1,17 @@
 /**
- * Cloud OTA Relay Server — Multi-device ESP32 → STM32
- * ═══════════════════════════════════════════════════════════════
+ * ╔══════════════════════════════════════════════════════════════╗
+ * ║        ESP32 Cloud OTA Relay Server — Node.js              ║
+ * ╠══════════════════════════════════════════════════════════════╣
+ * ║  • Serve giao diện Web UI từ /public                       ║
+ * ║  • Nhận heartbeat từ ESP32                                  ║
+ * ║  • Lưu firmware .bin                                        ║
+ * ║  • Trigger OTA cho từng ESP32 cụ thể                       ║
+ * ╚══════════════════════════════════════════════════════════════╝
  *
- *  Browser (GitHub Pages) ──HTTPS──▶ [This Server] ◀── ESP32 polls
- *
- *  Browser Endpoints:
- *    GET  /api/devices             → Danh sách ESP32 đang online
- *    POST /api/upload              → Upload firmware + chọn deviceId
- *    POST /api/trigger-ota         → Trigger OTA cho thiết bị cụ thể
- *    GET  /health                  → Health check
- *
- *  ESP32 Endpoints:
- *    POST /api/esp32-status        → Heartbeat (báo online)
- *    GET  /api/check-update?id=xx  → Poll firmware mới
- *    GET  /api/firmware?id=xx      → Tải firmware binary
- *    POST /api/ota-result          → Báo kết quả OTA
- *
- * ═══════════════════════════════════════════════════════════════
+ *  Cách dùng:
+ *    npm install
+ *    npm start          → chạy server tại localhost:3000
+ *    ngrok http 3000    → lấy URL public → nhét vào ESP32
  */
 
 const express = require('express');
@@ -28,132 +23,124 @@ const fs      = require('fs');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── Storage ──────────────────────────────────────────────────
-const STORE = path.join(__dirname, 'firmware_store');
-if (!fs.existsSync(STORE)) fs.mkdirSync(STORE, { recursive: true });
+// ── Paths ──────────────────────────────────────────────────────
+const STORE_DIR  = path.join(__dirname, 'firmware_store');
+const PUBLIC_DIR = path.join(__dirname, 'public');
 
-// ─── Middleware ───────────────────────────────────────────────
+[STORE_DIR, PUBLIC_DIR].forEach(d => {
+  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+});
+
+// ── Middleware ─────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 
-// ─── In-memory device registry ────────────────────────────────
-// Map<deviceId, DeviceState>
+// ── Serve Web UI ───────────────────────────────────────────────
+app.use(express.static(PUBLIC_DIR));
+
+// ── Device Registry (in-memory) ───────────────────────────────
 const devices = new Map();
 
 function getDevice(id) {
   if (!devices.has(id)) {
     devices.set(id, {
       id,
-      name        : id,
-      online      : false,
-      lastSeen    : null,
-      ip          : null,
-      version     : '0.0.0',
-      otaStatus   : 'idle',   // idle | pending | downloading | done | error
-      otaTrigger  : false,
-      lastResult  : null
+      name      : id,
+      lastSeen  : null,
+      ip        : null,
+      version   : '0.0.0',
+      otaStatus : 'idle',   // idle | pending | done | error
+      otaTrigger: false,
+      lastResult: null
     });
   }
   return devices.get(id);
 }
 
 function isOnline(dev) {
-  return dev.lastSeen && (Date.now() - dev.lastSeen < 90_000);
+  return dev.lastSeen && (Date.now() - dev.lastSeen < 90_000); // 90s timeout
 }
 
-// ─── Firmware store per-device ────────────────────────────────
-function fwPath(deviceId)  { return path.join(STORE, `${deviceId}.bin`); }
-function metaPath(deviceId){ return path.join(STORE, `${deviceId}.json`); }
+// ── Firmware helpers ───────────────────────────────────────────
+const fwBin  = id => path.join(STORE_DIR, `${id}.bin`);
+const fwMeta = id => path.join(STORE_DIR, `${id}.json`);
 
-function readMeta(deviceId) {
-  try { return JSON.parse(fs.readFileSync(metaPath(deviceId), 'utf8')); }
+function readMeta(id) {
+  try { return JSON.parse(fs.readFileSync(fwMeta(id), 'utf8')); }
   catch { return null; }
 }
-
-function saveMeta(deviceId, meta) {
-  fs.writeFileSync(metaPath(deviceId), JSON.stringify(meta, null, 2));
+function saveMeta(id, meta) {
+  fs.writeFileSync(fwMeta(id), JSON.stringify(meta, null, 2));
 }
 
-// ─── Upload (multer) ──────────────────────────────────────────
+// ── Multer upload ──────────────────────────────────────────────
 const upload = multer({
   storage: multer.diskStorage({
-    destination: STORE,
-    filename   : (req, _file, cb) => cb(null, `${req.body.deviceId || 'default'}.bin`)
+    destination: STORE_DIR,
+    filename: (req, _f, cb) => cb(null, `${req.body.deviceId || 'default'}.bin`)
   }),
-  limits: { fileSize: 4 * 1024 * 1024 }
+  limits: { fileSize: 4 * 1024 * 1024 } // 4 MB max
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  BROWSER ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  API dành cho Browser (Web UI)
+// ══════════════════════════════════════════════════════════════
 
-/**
- * GET /api/devices
- * Danh sách tất cả ESP32 từng kết nối
- */
+/** GET /api/devices → danh sách thiết bị */
 app.get('/api/devices', (_req, res) => {
-  const list = [];
-  for (const [id, dev] of devices) {
-    const meta = readMeta(id);
-    list.push({
-      id,
-      name      : dev.name,
-      online    : isOnline(dev),
-      lastSeen  : dev.lastSeen,
-      ip        : dev.ip,
-      version   : dev.version,
-      otaStatus : dev.otaStatus,
-      otaTrigger: dev.otaTrigger,
-      firmware  : meta
-    });
-  }
-  // Sort: online trước
+  const list = [...devices.values()].map(dev => ({
+    id        : dev.id,
+    name      : dev.name,
+    online    : isOnline(dev),
+    lastSeen  : dev.lastSeen,
+    ip        : dev.ip ? dev.ip.replace('::ffff:', '') : null,
+    version   : dev.version,
+    otaStatus : dev.otaStatus,
+    otaTrigger: dev.otaTrigger,
+    lastResult: dev.lastResult,
+    firmware  : readMeta(dev.id)
+  }));
   list.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
   res.json(list);
 });
 
-/**
- * POST /api/upload
- * Multipart: firmware (.bin) + deviceId + major + minor + patch
- * Nếu deviceId = "all" → upload cho tất cả thiết bị đang online
- */
+/** POST /api/upload → upload firmware .bin */
 app.post('/api/upload', upload.single('firmware'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No firmware file' });
+  if (!req.file) return res.status(400).json({ error: 'Không có file firmware' });
 
-  const deviceId = req.body.deviceId || 'default';
+  const id    = req.body.deviceId || 'default';
   const major = parseInt(req.body.major) || 1;
   const minor = parseInt(req.body.minor) || 0;
   const patch = parseInt(req.body.patch) || 0;
 
   const meta = {
-    deviceId, major, minor, patch,
+    deviceId  : id,
+    major, minor, patch,
     version   : `${major}.${minor}.${patch}`,
     size      : req.file.size,
     uploadedAt: new Date().toISOString()
   };
 
-  // Nếu file đã được multer lưu với tên deviceId.bin, rename nếu cần
-  const dest = fwPath(deviceId);
+  // multer đã lưu đúng tên rồi (deviceId.bin)
+  const dest = fwBin(id);
   if (req.file.path !== dest && fs.existsSync(req.file.path)) {
     fs.renameSync(req.file.path, dest);
   }
 
-  saveMeta(deviceId, meta);
+  saveMeta(id, meta);
 
-  // Reset trigger nếu đang pending
-  if (devices.has(deviceId)) {
-    devices.get(deviceId).otaStatus  = 'idle';
-    devices.get(deviceId).otaTrigger = false;
+  // reset trigger nếu upload lại
+  if (devices.has(id)) {
+    const d = devices.get(id);
+    d.otaStatus  = 'idle';
+    d.otaTrigger = false;
   }
 
-  console.log(`[UPLOAD] Device="${deviceId}" fw v${meta.version} — ${req.file.size} bytes`);
+  console.log(`[UPLOAD] ${id} → v${meta.version} (${req.file.size} bytes)`);
   res.json({ ok: true, meta });
 });
 
-/**
- * POST /api/trigger-ota
- * Body JSON: { "deviceId": "esp32-living-room" }
- */
+/** POST /api/trigger-ota → ra lệnh ESP32 update */
 app.post('/api/trigger-ota', (req, res) => {
   const { deviceId } = req.body;
   if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
@@ -167,112 +154,106 @@ app.post('/api/trigger-ota', (req, res) => {
   dev.otaTrigger = true;
   dev.otaStatus  = 'pending';
 
-  console.log(`[TRIGGER] Device="${deviceId}" OTA trigger set (fw v${meta.version})`);
-  res.json({ ok: true, message: `OTA triggered cho "${deviceId}". ESP32 sẽ bắt đầu trong vòng 30s` });
+  console.log(`[TRIGGER] ${deviceId} → OTA pending (v${meta.version})`);
+  res.json({ ok: true, message: `OTA triggered cho "${deviceId}". ESP32 sẽ thực hiện trong ≤30s` });
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  ESP32 ENDPOINTS
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  API dành cho ESP32
+// ══════════════════════════════════════════════════════════════
 
-/**
- * POST /api/esp32-status
- * Body JSON: { "id": "esp32-room1", "name": "Living Room", "version": "1.0.0" }
- */
+/** POST /api/esp32-status → heartbeat */
 app.post('/api/esp32-status', (req, res) => {
   const { id, name, version } = req.body;
   if (!id) return res.status(400).json({ error: 'id required' });
 
-  const dev      = getDevice(id);
-  dev.name       = name || id;
-  dev.lastSeen   = Date.now();
-  dev.online     = true;
-  dev.ip         = req.ip;
-  dev.version    = version || dev.version;
+  const dev    = getDevice(id);
+  dev.name     = name || id;
+  dev.lastSeen = Date.now();
+  dev.ip       = req.ip;
+  dev.version  = version || dev.version;
 
-  console.log(`[STATUS] Device="${id}" name="${dev.name}" v${dev.version} — ${req.ip}`);
+  console.log(`[HB] ${id} ("${dev.name}") v${dev.version} — ${dev.ip}`);
   res.json({ ok: true });
 });
 
-/**
- * GET /api/check-update?id=xxx
- * ESP32 poll firmware mới
- */
+/** GET /api/check-update?id=xxx → ESP32 poll */
 app.get('/api/check-update', (req, res) => {
   const id = req.query.id;
   if (!id) return res.status(400).json({ error: 'id required' });
 
-  const dev = getDevice(id);
+  const dev    = getDevice(id);
   dev.lastSeen = Date.now();
-  dev.online   = true;
   dev.ip       = req.ip;
 
   const meta = readMeta(id);
-  if (!meta) return res.json({ update: false });
-
-  if (dev.otaTrigger) {
-    console.log(`[CHECK] Device="${id}" → OTA triggered → v${meta.version}`);
-    res.json({
-      update   : true,
-      version  : meta.version,
-      major    : meta.major,
-      minor    : meta.minor,
-      patch    : meta.patch,
-      size     : meta.size
-    });
-  } else {
-    res.json({
-      update        : false,
-      serverVersion : meta.version,
-      myVersion     : dev.version
-    });
+  if (!meta || !dev.otaTrigger) {
+    return res.json({ update: false, serverVersion: meta?.version, myVersion: dev.version });
   }
+
+  console.log(`[CHECK] ${id} → triggered! sending v${meta.version}`);
+  res.json({
+    update : true,
+    version: meta.version,
+    major  : meta.major,
+    minor  : meta.minor,
+    patch  : meta.patch,
+    size   : meta.size
+  });
 });
 
-/**
- * GET /api/firmware?id=xxx
- * ESP32 tải binary
- */
+/** GET /api/firmware?id=xxx → tải binary */
 app.get('/api/firmware', (req, res) => {
-  const id   = req.query.id;
-  const fp   = fwPath(id || 'default');
+  const id = req.query.id;
+  const fp = fwBin(id || 'default');
 
   if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Firmware not found' });
 
-  console.log(`[FIRMWARE] Device="${id}" downloading...`);
+  console.log(`[DOWNLOAD] ${id} downloading firmware...`);
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', `attachment; filename="${id}.bin"`);
   res.sendFile(fp);
 });
 
-/**
- * POST /api/ota-result
- * Body JSON: { "id": "...", "success": true, "version": "1.1.0" }
- */
+/** POST /api/ota-result → kết quả OTA từ ESP32 */
 app.post('/api/ota-result', (req, res) => {
   const { id, success, version, error: errMsg } = req.body;
-  const dev = getDevice(id || 'default');
+  const dev = getDevice(id || 'unknown');
 
   if (success) {
     dev.version    = version || dev.version;
     dev.otaStatus  = 'done';
     dev.otaTrigger = false;
     dev.lastResult = { success: true, version, ts: Date.now() };
-    console.log(`[OTA] ✅ Device="${id}" → v${version}`);
+    console.log(`[OTA] ✅ ${id} → v${version}`);
   } else {
     dev.otaStatus  = 'error';
     dev.otaTrigger = false;
     dev.lastResult = { success: false, error: errMsg, ts: Date.now() };
-    console.log(`[OTA] ❌ Device="${id}" → ${errMsg}`);
+    console.log(`[OTA] ❌ ${id} → ${errMsg}`);
   }
 
   res.json({ ok: true });
 });
 
-// ─── Health ───────────────────────────────────────────────────
-app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now(), devices: devices.size }));
+// ── Health check ───────────────────────────────────────────────
+app.get('/health', (_req, res) => {
+  res.json({ ok: true, ts: Date.now(), devices: devices.size, uptime: process.uptime() });
+});
 
-// ─── Start ────────────────────────────────────────────────────
+// ── SPA fallback → trả index.html ──────────────────────────────
+app.get('*', (_req, res) => {
+  const idx = path.join(PUBLIC_DIR, 'index.html');
+  if (fs.existsSync(idx)) return res.sendFile(idx);
+  res.status(404).send('Web UI not found. Put index.html in server/public/');
+});
+
+// ── Start ──────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n=== Cloud OTA Relay Server — port ${PORT} ===\n`);
+  console.log('╔══════════════════════════════════════════╗');
+  console.log(`║  ESP32 OTA Server — http://localhost:${PORT}  ║`);
+  console.log('╠══════════════════════════════════════════╣');
+  console.log(`║  Web UI  : http://localhost:${PORT}           ║`);
+  console.log(`║  ngrok   : ngrok http ${PORT}                 ║`);
+  console.log('╚══════════════════════════════════════════╝\n');
 });
