@@ -26,12 +26,12 @@
 //  ★ CẤU HÌNH — SỬA THEO MÔI TRƯỜNG CỦA BẠN
 // ══════════════════════════════════════════════════════════════
 #define WIFI_SSID       "noname"
-#define WIFI_PASSWORD   "tamvemot"
+#define WIFI_PASSWORD   "12345678"
 
 // URL cloud server của bạn
 // Ví dụ Railway: "https://webota-server.up.railway.app"
 // Ví dụ EC2 HTTP: "http://18.228.223.47:3000"
-#define SERVER_BASE_URL "https://webota-production.up.railway.app/"
+#define SERVER_BASE_URL "https://bacn251.github.io/WEBOTA/"
 
 // ID + Tên hiển thị cho thiết bị này (phải unique nếu có nhiều ESP32)
 #define DEVICE_ID       "esp32-001"
