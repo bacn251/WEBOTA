@@ -42,6 +42,10 @@
 // Phiên bản firmware STM32 hiện tại
 #define CURRENT_VERSION "1.0.0"
 
+// ★ Bật/tắt gửi sensor data lên Dashboard (dùng giá trị giả để test)
+#define SENSOR_FAKE     true    // true = data giả | false = đọc cảm biến thật
+#define SENSOR_INTERVAL_S 10   // gửi sensor mỗi N giây
+
 // Poll server mỗi N giây
 #define POLL_INTERVAL_S  30
 
@@ -105,6 +109,39 @@ void reportHeartbeat() {
                 "\"version\":\"" + currentVersion + "\"}";
   int code = http.POST(body);
   Serial.printf("[HB] POST /api/esp32-status → HTTP %d\n", code);
+  http.end();
+}
+
+// ─── Gửi sensor data lên Dashboard ──────────────────────────
+void reportSensor() {
+#if SENSOR_FAKE
+  // ★ DATA GIẢ — thay bằng đọc cảm biến thật nếu có
+  float temp  = 25.0f + random(-50, 80) * 0.1f;   // 20–32 °C
+  float humi  = 60.0f + random(-200, 200) * 0.1f; // 40–80 %
+  float pres  = 1013.0f + random(-50, 50) * 0.1f; // ~1013 hPa
+  float light = random(100, 900);                  // 100–900 lux
+  float vcc   = 3.2f + random(0, 15) * 0.01f;     // 3.2–3.35 V
+#else
+  // ★ ĐỌC CẢM BIẾN THẬT — ví dụ DHT22, BMP280...
+  float temp  = 0; // TODO: dht.readTemperature();
+  float humi  = 0; // TODO: dht.readHumidity();
+  float pres  = 0; // TODO: bmp.readPressure() / 100.0;
+  float light = 0; // TODO: analogRead(LIGHT_PIN) * (1000.0/4095.0);
+  float vcc   = 0; // TODO: analogRead(VCC_PIN) * (3.3/4095.0) * 2;
+#endif
+
+  char body[256];
+  snprintf(body, sizeof(body),
+    "{\"id\":\"" DEVICE_ID "\","
+    "\"temp\":%.1f,\"humi\":%.1f,\"pres\":%.1f,"
+    "\"light\":%.0f,\"vcc\":%.2f}",
+    temp, humi, pres, light, vcc);
+
+  HTTPClient http;
+  http.begin(String(SERVER_BASE_URL) + "/api/sensor");
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(body);
+  Serial.printf("[SENSOR] HTTP %d | %s\n", code, body);
   http.end();
 }
 
@@ -310,12 +347,16 @@ void setup() {
 
 // ─── Loop ─────────────────────────────────────────────────────
 void loop() {
-  static uint32_t lastPoll = 0, lastHB = 0;
+  static uint32_t lastPoll = 0, lastHB = 0, lastSensor = 0;
 
   if (!otaInProgress) {
     if (millis() - lastHB > 20000) {
       lastHB = millis();
       reportHeartbeat();
+    }
+    if (millis() - lastSensor > (uint32_t)SENSOR_INTERVAL_S * 1000) {
+      lastSensor = millis();
+      reportSensor();
     }
     if (millis() - lastPoll > (uint32_t)POLL_INTERVAL_S * 1000) {
       lastPoll = millis();
