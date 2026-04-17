@@ -35,11 +35,30 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 app.use(cors());
 app.use(express.json());
 
+// Không cache các API route (tránh 304)
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // ── Serve Web UI ───────────────────────────────────────────────
 app.use(express.static(PUBLIC_DIR));
 
 // ── Device Registry (in-memory) ───────────────────────────────
 const devices = new Map();
+
+// ── Sensor Data Store (in-memory, giữ 60 điểm gần nhất) ───────
+const sensorStore = new Map(); // deviceId → array of {ts, temp, humi, ...}
+const SENSOR_MAX  = 60;
+
+function pushSensor(id, payload) {
+  if (!sensorStore.has(id)) sensorStore.set(id, []);
+  const arr = sensorStore.get(id);
+  arr.push({ ts: Date.now(), ...payload });
+  if (arr.length > SENSOR_MAX) arr.shift();
+}
 
 function getDevice(id) {
   if (!devices.has(id)) {
@@ -234,6 +253,31 @@ app.post('/api/ota-result', (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+/** POST /api/sensor → ESP32 gửi data cảm biến lên */
+app.post('/api/sensor', (req, res) => {
+  const { id, ...payload } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+  pushSensor(id, payload);
+  // cập nhật lastSeen luôn
+  const dev = getDevice(id);
+  dev.lastSeen = Date.now();
+  dev.ip = req.ip;
+  console.log(`[SENSOR] ${id} →`, payload);
+  res.json({ ok: true });
+});
+
+/** GET /api/sensor?id=xxx → Web lấy lịch sử sensor */
+app.get('/api/sensor', (req, res) => {
+  const id   = req.query.id;
+  const data = id ? (sensorStore.get(id) || []) : {};
+  if (!id) {
+    const all = {};
+    sensorStore.forEach((v, k) => { all[k] = v; });
+    return res.json(all);
+  }
+  res.json(data);
 });
 
 // ── Health check ───────────────────────────────────────────────
